@@ -50,6 +50,8 @@ import {
     ListItemIcon,
     ListItemText,
     Snackbar,
+    InputAdornment,
+    Slider,
 } from "@mui/material";
 import SortIcon from "@mui/icons-material/Sort";
 import SaveIcon from "@mui/icons-material/Save";
@@ -62,6 +64,7 @@ import FileUploadIcon from "@mui/icons-material/FileUpload";
 import FileDownloadIcon from "@mui/icons-material/FileDownload";
 import LogoutIcon from "@mui/icons-material/Logout";
 import MenuIcon from "@mui/icons-material/Menu";
+import AutoFixHighIcon from "@mui/icons-material/AutoFixHigh";
 
 // 根据环境选择使用真实API还是模拟API
 const isDevEnvironment = import.meta.env.DEV;
@@ -79,11 +82,32 @@ enum SortMode {
     SiteSort, // 站点排序
 }
 
+// 辅助函数：提取域名
+function extractDomain(url: string): string | null {
+    if (!url) return null;
+    
+    try {
+        // 尝试自动添加协议头，如果缺少的话
+        let fullUrl = url;
+        if (!/^https?:\/\//i.test(url)) {
+            fullUrl = 'http://' + url;
+        }
+        const parsedUrl = new URL(fullUrl);
+        return parsedUrl.hostname;
+    } catch (e) {
+        // 尝试备用方法
+        const match = url.match(/^(?:https?:\/\/)?(?:[^@\n]+@)?(?:www\.)?([^:\/\n?]+)/im);
+        return match && match[1] ? match[1] : url;
+    }
+}
+
 // 默认配置
 const DEFAULT_CONFIGS = {
     "site.title": "导航站",
     "site.name": "导航站",
     "site.customCss": "",
+    "site.backgroundImage": "", // 背景图片URL
+    "site.backgroundOpacity": "0.15", // 背景蒙版透明度
 };
 
 function App() {
@@ -177,6 +201,9 @@ function App() {
     // 错误提示框状态
     const [snackbarOpen, setSnackbarOpen] = useState(false);
     const [snackbarMessage, setSnackbarMessage] = useState("");
+    // 导入结果提示框状态
+    const [importResultOpen, setImportResultOpen] = useState(false);
+    const [importResultMessage, setImportResultMessage] = useState("");
 
     // 菜单打开关闭
     const handleMenuOpen = (event: React.MouseEvent<HTMLButtonElement>) => {
@@ -641,14 +668,28 @@ function App() {
     const handleExportData = async () => {
         try {
             setLoading(true);
+            
+            // 提取所有站点数据为单独的数组
+            const allSites: Site[] = [];
+            groups.forEach(group => {
+                if (group.sites && group.sites.length > 0) {
+                    allSites.push(...group.sites);
+                }
+            });
+            
             const exportData = {
+                // 只导出分组基本信息，不包含站点
                 groups: groups.map(group => ({
                     id: group.id,
                     name: group.name,
                     order_num: group.order_num,
-                    sites: group.sites,
                 })),
+                // 站点数据作为单独的顶级数组
+                sites: allSites,
                 configs: configs,
+                // 添加版本和导出日期
+                version: "1.0",
+                exportDate: new Date().toISOString(),
             };
 
             // 创建并下载JSON文件
@@ -715,33 +756,33 @@ function App() {
                     if (!importData.groups || !Array.isArray(importData.groups)) {
                         throw new Error("导入文件格式错误：缺少分组数据");
                     }
-
-                    // 导入分组和站点
-                    // 这里简化处理，实际应用中可能需要更复杂的导入逻辑
-                    for (const group of importData.groups) {
-                        // 创建分组
-                        const createdGroup = await api.createGroup({
-                            name: group.name,
-                            order_num: group.order_num,
-                        } as Group);
-
-                        // 创建站点
-                        if (group.sites && Array.isArray(group.sites)) {
-                            for (const site of group.sites) {
-                                await api.createSite({
-                                    ...site,
-                                    group_id: createdGroup.id,
-                                    id: undefined, // 不传入id，让数据库自动生成新id
-                                } as Site);
-                            }
-                        }
+                    
+                    if (!importData.sites || !Array.isArray(importData.sites)) {
+                        throw new Error("导入文件格式错误：缺少站点数据");
+                    }
+                    
+                    if (!importData.configs || typeof importData.configs !== "object") {
+                        throw new Error("导入文件格式错误：缺少配置数据");
                     }
 
-                    // 导入配置
-                    if (importData.configs) {
-                        for (const [key, value] of Object.entries(importData.configs)) {
-                            await api.setConfig(key, value as string);
-                        }
+                    // 调用API导入数据
+                    const result = await api.importData(importData);
+                    
+                    if (!result.success) {
+                        throw new Error(result.error || "导入失败");
+                    }
+                    
+                    // 显示导入结果统计
+                    const stats = result.stats;
+                    if (stats) {
+                        const summary = [
+                            `导入成功！`,
+                            `分组：发现${stats.groups.total}个，新建${stats.groups.created}个，合并${stats.groups.merged}个`,
+                            `卡片：发现${stats.sites.total}个，新建${stats.sites.created}个，更新${stats.sites.updated}个，跳过${stats.sites.skipped}个`
+                        ].join("\n");
+                        
+                        setImportResultMessage(summary);
+                        setImportResultOpen(true);
                     }
 
                     // 刷新数据
@@ -862,19 +903,81 @@ function App() {
                 </Alert>
             </Snackbar>
 
+            {/* 导入结果提示 Snackbar */}
+            <Snackbar
+                open={importResultOpen}
+                autoHideDuration={6000}
+                onClose={() => setImportResultOpen(false)}
+                anchorOrigin={{ vertical: "top", horizontal: "center" }}
+            >
+                <Alert
+                    onClose={() => setImportResultOpen(false)}
+                    severity='success'
+                    variant='filled'
+                    sx={{
+                        width: "100%",
+                        whiteSpace: 'pre-line',
+                        backgroundColor: theme => theme.palette.mode === 'dark' ? '#2e7d32' : undefined,
+                        color: theme => theme.palette.mode === 'dark' ? '#fff' : undefined,
+                        '& .MuiAlert-icon': {
+                            color: theme => theme.palette.mode === 'dark' ? '#fff' : undefined
+                        }
+                    }}
+                >
+                    {importResultMessage}
+                </Alert>
+            </Snackbar>
+
             <Box
                 sx={{
                     minHeight: "100vh",
                     bgcolor: "background.default",
                     color: "text.primary",
                     transition: "all 0.3s ease-in-out",
+                    position: "relative", // 添加相对定位，作为背景图片的容器
+                    overflow: "hidden", // 防止背景图片溢出
                 }}
             >
+                {/* 背景图片 */}
+                {configs["site.backgroundImage"] && (
+                    <>
+                        <Box
+                            sx={{
+                                position: "absolute",
+                                top: 0,
+                                left: 0,
+                                right: 0,
+                                bottom: 0,
+                                backgroundImage: `url(${configs["site.backgroundImage"]})`,
+                                backgroundSize: "cover",
+                                backgroundPosition: "center",
+                                backgroundRepeat: "no-repeat",
+                                zIndex: 0,
+                                "&::before": {
+                                    content: '""',
+                                    position: "absolute",
+                                    top: 0,
+                                    left: 0,
+                                    right: 0,
+                                    bottom: 0,
+                                    backgroundColor: theme => 
+                                        theme.palette.mode === "dark" 
+                                            ? "rgba(0, 0, 0, " + (1 - Number(configs["site.backgroundOpacity"])) + ")" 
+                                            : "rgba(255, 255, 255, " + (1 - Number(configs["site.backgroundOpacity"])) + ")",
+                                    zIndex: 1,
+                                },
+                            }}
+                        />
+                    </>
+                )}
+                
                 <Container
                     maxWidth='lg'
                     sx={{
                         py: 4,
                         px: { xs: 2, sm: 3, md: 4 },
+                        position: "relative", // 使内容位于背景图片和蒙版之上
+                        zIndex: 2,
                     }}
                 >
                     <Box
@@ -884,7 +987,7 @@ function App() {
                             alignItems: "center",
                             mb: 5,
                             flexDirection: { xs: "column", sm: "row" },
-                            gap: { xs: 2, sm: 0 }
+                            gap: { xs: 2, sm: 0 },
                         }}
                     >
                         <Typography
@@ -892,20 +995,20 @@ function App() {
                             component='h1'
                             fontWeight='bold'
                             color='text.primary'
-                            sx={{ 
-                                fontSize: { xs: '1.75rem', sm: '2.125rem', md: '3rem' },
-                                textAlign: { xs: 'center', sm: 'left' }
+                            sx={{
+                                fontSize: { xs: "1.75rem", sm: "2.125rem", md: "3rem" },
+                                textAlign: { xs: "center", sm: "left" },
                             }}
                         >
                             {configs["site.name"]}
                         </Typography>
-                        <Stack 
-                            direction={{ xs: 'row', sm: 'row' }} 
-                            spacing={{ xs: 1, sm: 2 }} 
-                            alignItems="center"
-                            width={{ xs: '100%', sm: 'auto' }}
-                            justifyContent={{ xs: 'center', sm: 'flex-end' }}
-                            flexWrap="wrap"
+                        <Stack
+                            direction={{ xs: "row", sm: "row" }}
+                            spacing={{ xs: 1, sm: 2 }}
+                            alignItems='center'
+                            width={{ xs: "100%", sm: "auto" }}
+                            justifyContent={{ xs: "center", sm: "flex-end" }}
+                            flexWrap='wrap'
                             sx={{ gap: { xs: 1, sm: 2 }, py: { xs: 1, sm: 0 } }}
                         >
                             {sortMode !== SortMode.None ? (
@@ -916,10 +1019,10 @@ function App() {
                                             color='primary'
                                             startIcon={<SaveIcon />}
                                             onClick={handleSaveGroupOrder}
-                                            size="small"
-                                            sx={{ 
-                                                minWidth: 'auto',
-                                                fontSize: { xs: '0.75rem', sm: '0.875rem' }
+                                            size='small'
+                                            sx={{
+                                                minWidth: "auto",
+                                                fontSize: { xs: "0.75rem", sm: "0.875rem" },
                                             }}
                                         >
                                             保存分组顺序
@@ -930,10 +1033,10 @@ function App() {
                                         color='inherit'
                                         startIcon={<CancelIcon />}
                                         onClick={cancelSort}
-                                        size="small"
-                                        sx={{ 
-                                            minWidth: 'auto',
-                                            fontSize: { xs: '0.75rem', sm: '0.875rem' }
+                                        size='small'
+                                        sx={{
+                                            minWidth: "auto",
+                                            fontSize: { xs: "0.75rem", sm: "0.875rem" },
                                         }}
                                     >
                                         取消编辑
@@ -946,10 +1049,10 @@ function App() {
                                         color='primary'
                                         startIcon={<AddIcon />}
                                         onClick={handleOpenAddGroup}
-                                        size="small"
-                                        sx={{ 
-                                            minWidth: 'auto',
-                                            fontSize: { xs: '0.75rem', sm: '0.875rem' }
+                                        size='small'
+                                        sx={{
+                                            minWidth: "auto",
+                                            fontSize: { xs: "0.75rem", sm: "0.875rem" },
                                         }}
                                     >
                                         新增分组
@@ -963,10 +1066,10 @@ function App() {
                                         aria-controls={openMenu ? "navigation-menu" : undefined}
                                         aria-haspopup='true'
                                         aria-expanded={openMenu ? "true" : undefined}
-                                        size="small"
-                                        sx={{ 
-                                            minWidth: 'auto',
-                                            fontSize: { xs: '0.75rem', sm: '0.875rem' }
+                                        size='small'
+                                        sx={{
+                                            minWidth: "auto",
+                                            fontSize: { xs: "0.75rem", sm: "0.875rem" },
                                         }}
                                     >
                                         更多选项
@@ -1106,9 +1209,9 @@ function App() {
                         fullWidth
                         PaperProps={{
                             sx: {
-                                m: { xs: 2, sm: 'auto' },
-                                width: { xs: 'calc(100% - 32px)', sm: 'auto' }
-                            }
+                                m: { xs: 2, sm: "auto" },
+                                width: { xs: "calc(100% - 32px)", sm: "auto" },
+                            },
                         }}
                     >
                         <DialogTitle>
@@ -1152,16 +1255,16 @@ function App() {
                     </Dialog>
 
                     {/* 新增站点对话框 */}
-                    <Dialog 
-                        open={openAddSite} 
-                        onClose={handleCloseAddSite} 
-                        maxWidth='md' 
+                    <Dialog
+                        open={openAddSite}
+                        onClose={handleCloseAddSite}
+                        maxWidth='md'
                         fullWidth
                         PaperProps={{
                             sx: {
-                                m: { xs: 2, sm: 'auto' },
-                                width: { xs: 'calc(100% - 32px)', sm: 'auto' }
-                            }
+                                m: { xs: 2, sm: "auto" },
+                                width: { xs: "calc(100% - 32px)", sm: "auto" },
+                            },
                         }}
                     >
                         <DialogTitle>
@@ -1181,7 +1284,13 @@ function App() {
                         <DialogContent>
                             <DialogContentText sx={{ mb: 2 }}>请输入新站点的信息</DialogContentText>
                             <Stack spacing={2}>
-                                <Box sx={{ display: 'flex', gap: 2, flexDirection: { xs: 'column', sm: 'row' } }}>
+                                <Box
+                                    sx={{
+                                        display: "flex",
+                                        gap: 2,
+                                        flexDirection: { xs: "column", sm: "row" },
+                                    }}
+                                >
                                     <Box sx={{ flex: 1 }}>
                                         <TextField
                                             autoFocus
@@ -1220,6 +1329,34 @@ function App() {
                                     variant='outlined'
                                     value={newSite.icon}
                                     onChange={handleSiteInputChange}
+                                    InputProps={{
+                                        endAdornment: (
+                                            <InputAdornment position="end">
+                                                <IconButton
+                                                    onClick={() => {
+                                                        if (!newSite.url) {
+                                                            handleError("请先输入站点URL");
+                                                            return;
+                                                        }
+                                                        const domain = extractDomain(newSite.url);
+                                                        if (domain) {
+                                                            const iconUrl = `https://www.faviconextractor.com/favicon/${domain}`;
+                                                            setNewSite({
+                                                                ...newSite,
+                                                                icon: iconUrl
+                                                            });
+                                                        } else {
+                                                            handleError("无法从URL中获取域名");
+                                                        }
+                                                    }}
+                                                    edge="end"
+                                                    title="自动获取图标"
+                                                >
+                                                    <AutoFixHighIcon />
+                                                </IconButton>
+                                            </InputAdornment>
+                                        ),
+                                    }}
                                 />
                                 <TextField
                                     margin='dense'
@@ -1258,16 +1395,17 @@ function App() {
                     </Dialog>
 
                     {/* 网站配置对话框 */}
-                    <Dialog 
-                        open={openConfig} 
-                        onClose={handleCloseConfig} 
-                        maxWidth='md' 
+                    <Dialog
+                        open={openConfig}
+                        onClose={handleCloseConfig}
+                        maxWidth='sm'
                         fullWidth
                         PaperProps={{
                             sx: {
-                                m: { xs: 2, sm: 'auto' },
-                                width: { xs: 'calc(100% - 32px)', sm: 'auto' }
-                            }
+                                m: { xs: 2, sm: 3, md: 4 },
+                                width: { xs: "calc(100% - 32px)", sm: "80%", md: "70%", lg: "60%" },
+                                maxWidth: { sm: "600px" },
+                            },
                         }}
                     >
                         <DialogTitle>
@@ -1311,6 +1449,49 @@ function App() {
                                     value={tempConfigs["site.name"]}
                                     onChange={handleConfigInputChange}
                                 />
+                                {/* 新增背景图片设置 */}
+                                <Box sx={{ mb: 1 }}>
+                                    <Typography variant="subtitle1" gutterBottom>
+                                        背景图片设置
+                                    </Typography>
+                                    <TextField
+                                        margin='dense'
+                                        id='site-background-image'
+                                        name='site.backgroundImage'
+                                        label='背景图片URL'
+                                        type='url'
+                                        fullWidth
+                                        variant='outlined'
+                                        value={tempConfigs["site.backgroundImage"]}
+                                        onChange={handleConfigInputChange}
+                                        placeholder='https://example.com/background.jpg'
+                                        helperText='输入图片URL，留空则不使用背景图片'
+                                    />
+                                    
+                                    <Box sx={{ mt: 2, mb: 1 }}>
+                                        <Typography variant="body2" color="text.secondary" id="background-opacity-slider" gutterBottom>
+                                            背景蒙版透明度: {Number(tempConfigs["site.backgroundOpacity"]).toFixed(2)}
+                                        </Typography>
+                                        <Slider
+                                            aria-labelledby="background-opacity-slider"
+                                            name="site.backgroundOpacity"
+                                            min={0}
+                                            max={1}
+                                            step={0.01}
+                                            valueLabelDisplay="auto"
+                                            value={Number(tempConfigs["site.backgroundOpacity"])}
+                                            onChange={(_, value) => {
+                                                setTempConfigs({
+                                                    ...tempConfigs,
+                                                    "site.backgroundOpacity": String(value),
+                                                });
+                                            }}
+                                        />
+                                        <Typography variant="caption" color="text.secondary">
+                                            值越大，背景图片越清晰，内容可能越难看清
+                                        </Typography>
+                                    </Box>
+                                </Box>
                                 <TextField
                                     margin='dense'
                                     id='site-custom-css'
@@ -1338,16 +1519,16 @@ function App() {
                     </Dialog>
 
                     {/* 导入数据对话框 */}
-                    <Dialog 
-                        open={openImport} 
-                        onClose={handleCloseImport} 
-                        maxWidth='sm' 
+                    <Dialog
+                        open={openImport}
+                        onClose={handleCloseImport}
+                        maxWidth='sm'
                         fullWidth
                         PaperProps={{
                             sx: {
-                                m: { xs: 2, sm: 'auto' },
-                                width: { xs: 'calc(100% - 32px)', sm: 'auto' }
-                            }
+                                m: { xs: 2, sm: "auto" },
+                                width: { xs: "calc(100% - 32px)", sm: "auto" },
+                            },
                         }}
                     >
                         <DialogTitle>
